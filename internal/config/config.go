@@ -2,119 +2,180 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // Config holds every setting used by the TaskFlow services.
 type Config struct {
-	Env      string
-	LogLevel string
-
-	HTTPAddr string
-	APIKey   string
-
 	DatabaseURL string
-	RedisURL    string
+	RedisAddr   string
+	APIKey      string
+	HTTPAddr    string
 
-	WorkerID          string
 	WorkerConcurrency int
+	WorkerID          string
 	HeartbeatInterval time.Duration
 	HeartbeatTTL      time.Duration
 
-	SchedulerPollInterval time.Duration
-	SchedulerBatchSize    int
-	SchedulerLockTTL      time.Duration
-
+	SchedulerTick    time.Duration
 	RecoveryInterval time.Duration
-	MaxRetries       int
 	BackoffBase      time.Duration
 	BackoffMax       time.Duration
 
+	LogLevel        string
 	ShutdownTimeout time.Duration
 }
 
-// Load reads configuration from the environment, applying defaults.
-func Load() (Config, error) {
-	var errs []error
-	str := func(key, def string) string {
-		if v, ok := os.LookupEnv(key); ok && v != "" {
-			return v
-		}
-		return def
-	}
-	integer := func(key string, def int) int {
-		v := str(key, "")
-		if v == "" {
-			return def
-		}
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
-			return def
-		}
-		return n
-	}
-	dur := func(key string, def time.Duration) time.Duration {
-		v := str(key, "")
-		if v == "" {
-			return def
-		}
-		d, err := time.ParseDuration(v)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", key, err))
-			return def
-		}
-		return d
-	}
+// Load reads configuration from the process environment.
+func Load() (Config, error) { return LoadFrom(os.LookupEnv) }
 
-	host, _ := os.Hostname()
+// LoadFrom reads configuration through lookup (os.LookupEnv in production),
+// applies defaults, and validates. All problems are reported together.
+func LoadFrom(lookup func(string) (string, bool)) (Config, error) {
+	r := reader{lookup: lookup}
 
 	cfg := Config{
-		Env:      str("APP_ENV", "development"),
-		LogLevel: str("LOG_LEVEL", "info"),
+		DatabaseURL: r.str("DATABASE_URL", "postgres://taskflow:taskflow@localhost:5432/taskflow?sslmode=disable"),
+		RedisAddr:   r.str("REDIS_ADDR", "localhost:6379"),
+		APIKey:      r.str("API_KEY", ""),
+		HTTPAddr:    r.str("HTTP_ADDR", ":8080"),
 
-		HTTPAddr: str("HTTP_ADDR", ":8080"),
-		APIKey:   str("API_KEY", "dev-api-key"),
+		WorkerConcurrency: r.integer("WORKER_CONCURRENCY", 50),
+		HeartbeatInterval: r.duration("HEARTBEAT_INTERVAL", 5*time.Second),
+		HeartbeatTTL:      r.duration("HEARTBEAT_TTL", 15*time.Second),
 
-		DatabaseURL: str("DATABASE_URL", "postgres://taskflow:taskflow@localhost:5432/taskflow?sslmode=disable"),
-		RedisURL:    str("REDIS_URL", "redis://localhost:6379/0"),
+		SchedulerTick:    r.duration("SCHEDULER_TICK", time.Second),
+		RecoveryInterval: r.duration("RECOVERY_INTERVAL", 5*time.Second),
+		BackoffBase:      r.duration("BACKOFF_BASE", 2*time.Second),
+		BackoffMax:       r.duration("BACKOFF_MAX", 5*time.Minute),
 
-		WorkerID:          str("WORKER_ID", host),
-		WorkerConcurrency: integer("WORKER_CONCURRENCY", 50),
-		HeartbeatInterval: dur("HEARTBEAT_INTERVAL", 5*time.Second),
-		HeartbeatTTL:      dur("HEARTBEAT_TTL", 15*time.Second),
-
-		SchedulerPollInterval: dur("SCHEDULER_POLL_INTERVAL", time.Second),
-		SchedulerBatchSize:    integer("SCHEDULER_BATCH_SIZE", 100),
-		SchedulerLockTTL:      dur("SCHEDULER_LOCK_TTL", 10*time.Second),
-
-		RecoveryInterval: dur("RECOVERY_INTERVAL", 5*time.Second),
-		MaxRetries:       integer("MAX_RETRIES", 3),
-		BackoffBase:      dur("BACKOFF_BASE", 2*time.Second),
-		BackoffMax:       dur("BACKOFF_MAX", 5*time.Minute),
-
-		ShutdownTimeout: dur("SHUTDOWN_TIMEOUT", 30*time.Second),
+		LogLevel:        strings.ToLower(r.str("LOG_LEVEL", "info")),
+		ShutdownTimeout: r.duration("SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
 
-	if len(errs) > 0 {
-		return Config{}, fmt.Errorf("invalid configuration: %w", joinErrs(errs))
+	cfg.WorkerID = r.str("WORKER_ID", "")
+	if cfg.WorkerID == "" {
+		id, err := defaultWorkerID()
+		if err != nil {
+			r.errs = append(r.errs, fmt.Errorf("WORKER_ID: %w", err))
+		}
+		cfg.WorkerID = id
+	}
+
+	if err := errors.Join(append(r.errs, cfg.Validate())...); err != nil {
+		return Config{}, fmt.Errorf("config: %w", err)
 	}
 	return cfg, nil
 }
 
-func joinErrs(errs []error) error {
-	if len(errs) == 1 {
-		return errs[0]
+// Validate checks that the values are usable. It returns every problem found.
+func (c Config) Validate() error {
+	var errs []error
+	bad := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+
+	if c.DatabaseURL == "" {
+		bad("DATABASE_URL is required")
 	}
-	msg := ""
-	for i, e := range errs {
-		if i > 0 {
-			msg += "; "
-		}
-		msg += e.Error()
+	if c.APIKey == "" {
+		bad("API_KEY is required")
 	}
-	return fmt.Errorf("%s", msg)
+	if _, _, err := net.SplitHostPort(c.RedisAddr); err != nil {
+		bad("REDIS_ADDR %q must be host:port", c.RedisAddr)
+	}
+	if _, _, err := net.SplitHostPort(c.HTTPAddr); err != nil {
+		bad("HTTP_ADDR %q must be [host]:port", c.HTTPAddr)
+	}
+	if c.WorkerConcurrency < 1 || c.WorkerConcurrency > 10000 {
+		bad("WORKER_CONCURRENCY %d out of range [1, 10000]", c.WorkerConcurrency)
+	}
+	if c.WorkerID == "" {
+		bad("WORKER_ID must not be empty")
+	}
+	if c.HeartbeatInterval <= 0 {
+		bad("HEARTBEAT_INTERVAL must be positive")
+	}
+	if c.HeartbeatTTL <= c.HeartbeatInterval {
+		bad("HEARTBEAT_TTL (%s) must be greater than HEARTBEAT_INTERVAL (%s)", c.HeartbeatTTL, c.HeartbeatInterval)
+	}
+	if c.SchedulerTick <= 0 {
+		bad("SCHEDULER_TICK must be positive")
+	}
+	if c.RecoveryInterval <= 0 {
+		bad("RECOVERY_INTERVAL must be positive")
+	}
+	if c.BackoffBase <= 0 {
+		bad("BACKOFF_BASE must be positive")
+	}
+	if c.BackoffMax < c.BackoffBase {
+		bad("BACKOFF_MAX (%s) must be at least BACKOFF_BASE (%s)", c.BackoffMax, c.BackoffBase)
+	}
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		bad("LOG_LEVEL %q must be debug, info, warn or error", c.LogLevel)
+	}
+	if c.ShutdownTimeout <= 0 {
+		bad("SHUTDOWN_TIMEOUT must be positive")
+	}
+	return errors.Join(errs...)
+}
+
+// defaultWorkerID returns "<hostname>-<8 random hex chars>".
+func defaultWorkerID() (string, error) {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "worker"
+	}
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return host, fmt.Errorf("generate random suffix: %w", err)
+	}
+	return host + "-" + hex.EncodeToString(b), nil
+}
+
+// reader pulls typed values out of a lookup function, collecting parse errors.
+type reader struct {
+	lookup func(string) (string, bool)
+	errs   []error
+}
+
+func (r *reader) str(key, def string) string {
+	if v, ok := r.lookup(key); ok && v != "" {
+		return v
+	}
+	return def
+}
+
+func (r *reader) integer(key string, def int) int {
+	v := r.str(key, "")
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s: %q is not an integer", key, v))
+		return def
+	}
+	return n
+}
+
+func (r *reader) duration(key string, def time.Duration) time.Duration {
+	v := r.str(key, "")
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		r.errs = append(r.errs, fmt.Errorf("%s: %q is not a duration (e.g. 5s, 2m)", key, v))
+		return def
+	}
+	return d
 }

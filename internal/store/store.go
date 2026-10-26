@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
+
 	"github.com/your-org/taskflow/internal/domain"
 )
 
@@ -27,6 +29,6 @@ func (s *Store) Ping(ctx context.Context) error { return ctx.Err() }
 func (s *Store) Close() {}
 
 // GetJob loads a job by ID.
-func (s *Store) GetJob(ctx context.Context, id string) (domain.Job, error) {
+func (s *Store) GetJob(ctx context.Context, id uuid.UUID) (domain.Job, error) {
 	return domain.Job{}, ErrNotFound
 }

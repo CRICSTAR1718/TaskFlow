@@ -1,7 +1,5 @@
 package domain
 
-import "fmt"
-
 // Status is the lifecycle state of a job or job run.
 type Status string
 
@@ -17,60 +15,36 @@ const (
 
 // Valid reports whether s is a known status.
 func (s Status) Valid() bool {
-	switch s {
-	case StatusPending, StatusQueued, StatusRunning, StatusSucceeded,
-		StatusRetrying, StatusDead, StatusCancelled:
-		return true
+	_, ok := transitions[s]
+	return ok
+}
+
+// Terminal reports whether no transition leaves s.
+func (s Status) Terminal() bool {
+	to, ok := transitions[s]
+	return ok && len(to) == 0
+}
+
+// transitions lists the allowed next states for each status.
+//
+//   - RUNNING→QUEUED re-queues a job whose worker died.
+//   - SUCCEEDED→PENDING reschedules a cron job for its next run.
+var transitions = map[Status][]Status{
+	StatusPending:   {StatusQueued, StatusCancelled},
+	StatusQueued:    {StatusRunning, StatusCancelled},
+	StatusRunning:   {StatusSucceeded, StatusRetrying, StatusDead, StatusQueued, StatusCancelled},
+	StatusRetrying:  {StatusQueued, StatusDead, StatusCancelled},
+	StatusSucceeded: {StatusPending},
+	StatusDead:      {},
+	StatusCancelled: {},
+}
+
+// CanTransition reports whether a job may move from one status to another.
+func CanTransition(from, to Status) bool {
+	for _, next := range transitions[from] {
+		if next == to {
+			return true
+		}
 	}
 	return false
-}
-
-// Terminal reports whether no further transitions happen from s.
-func (s Status) Terminal() bool {
-	return s == StatusSucceeded || s == StatusDead || s == StatusCancelled
-}
-
-// Priority orders jobs in the queue; higher runs first.
-type Priority int
-
-const (
-	PriorityLow    Priority = 1
-	PriorityNormal Priority = 2
-	PriorityHigh   Priority = 3
-)
-
-// String returns high, normal or low.
-func (p Priority) String() string {
-	switch p {
-	case PriorityHigh:
-		return "high"
-	case PriorityNormal:
-		return "normal"
-	case PriorityLow:
-		return "low"
-	}
-	return fmt.Sprintf("priority(%d)", int(p))
-}
-
-// MarshalText encodes the priority as its name in JSON.
-func (p Priority) MarshalText() ([]byte, error) {
-	if p < PriorityLow || p > PriorityHigh {
-		return nil, fmt.Errorf("invalid priority %d", int(p))
-	}
-	return []byte(p.String()), nil
-}
-
-// UnmarshalText decodes high, normal or low.
-func (p *Priority) UnmarshalText(b []byte) error {
-	switch string(b) {
-	case "high":
-		*p = PriorityHigh
-	case "normal", "":
-		*p = PriorityNormal
-	case "low":
-		*p = PriorityLow
-	default:
-		return fmt.Errorf("invalid priority %q", b)
-	}
-	return nil
 }

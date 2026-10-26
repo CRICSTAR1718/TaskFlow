@@ -11,7 +11,7 @@ import (
 
 // Run polls until ctx is cancelled.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
-	t := time.NewTicker(cfg.SchedulerPollInterval)
+	t := time.NewTicker(cfg.SchedulerTick)
 	defer t.Stop()
 	for {
 		select {
