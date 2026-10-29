@@ -5,7 +5,7 @@ BIN := bin
 SERVICES := api scheduler worker recovery
 MIGRATE := migrate -path migrations -database "$(DATABASE_URL)"
 
-.PHONY: up down build test lint migrate-up migrate-down run-api run-worker run-scheduler run-recovery loadtest
+.PHONY: up down build test lint migrate-up migrate-down run-api run-worker run-scheduler run-recovery loadtest seed
 
 up:
 	docker compose up -d --wait
@@ -42,3 +42,6 @@ run-recovery:
 
 loadtest:
 	go run ./scripts/loadtest
+
+seed:
+	psql "$(DATABASE_URL)" -f scripts/seed.sql
