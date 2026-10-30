@@ -112,23 +112,27 @@ jobs:
       - name: go mod download
         run: go mod download
 
-      - name: Wait for Postgres
+      # The runner image does NOT ship redis-cli or psql, so we only use bash's
+      # /dev/tcp for the readiness probe - no extra binaries, no apt-get.
+      # (GitHub already waits for the service healthchecks before running steps;
+      #  this is a belt-and-braces check that the ports really accept connections.)
+      - name: Wait for Postgres and Redis
         run: |
-          for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U taskflow -d taskflow; then exit 0; fi
-            sleep 1
-          done
-          echo "::error::Postgres did not become ready in time"
-          exit 1
-
-      - name: Wait for Redis
-        run: |
-          for i in $(seq 1 30); do
-            if redis-cli -h localhost -p 6379 ping | grep -q PONG; then exit 0; fi
-            sleep 1
-          done
-          echo "::error::Redis did not become ready in time"
-          exit 1
+          set -uo pipefail
+          wait_for_port() {
+            local name="$1" port="$2"
+            for _ in $(seq 1 60); do
+              if (echo > "/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+                echo "${name} is accepting connections on 127.0.0.1:${port}"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::${name} never opened port ${port}"
+            return 1
+          }
+          wait_for_port Postgres 5432
+          wait_for_port Redis 6379
 
       # Cache the golang-migrate CLI so we don't recompile it on every run.
       - name: Cache migrate CLI
