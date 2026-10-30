@@ -1,17 +1,98 @@
+# TaskFlow â€” golangci-lint configuration (schema v2, golangci-lint >= v2.1)
+# Owner: Vinay Pratap Singh (P0.4)
+# Copy this file to:  <repo-root>/.golangci.yml
+#
+# Run locally:  golangci-lint run            (lint)
+#               golangci-lint fmt            (auto-format with gofmt+goimports)
+#
+# Required linters (per P0.4): errcheck, govet, staticcheck, gosec, revive,
+# gofmt, goimports. In config schema v2, gofmt/goimports are *formatters*,
+# not linters, so they live under `formatters:`.
+
 version: "2"
+
 run:
   timeout: 5m
+  tests: true
+
 linters:
-  default: standard
+  # Start from nothing and opt in explicitly, so the ruleset is predictable.
+  default: none
   enable:
-    - bodyclose
-    - errorlint
-    - gocritic
-    - misspell
-    - noctx
-    - revive
-    - unconvert
+    # --- required by the task ---
+    - errcheck      # unhandled errors returned from function calls
+    - govet         # standard go vet suite (printf, copylocks, lostcancel, ...)
+    - staticcheck   # bugs + simplifications (includes gosimple/stylecheck in v2)
+    - gosec         # security issues (SQL injection, weak crypto, file perms)
+    - revive        # style: naming, error strings, early-return, context rules
+    # --- cheap, high-value extras ---
+    - ineffassign   # assignments whose value is never used
+    - unused        # unused funcs/types/fields
+    - bodyclose     # http.Response.Body must be closed
+    - errorlint     # use errors.Is/As + %w instead of == / type assertions
+    - misspell      # typos in comments and strings
+
+  settings:
+    errcheck:
+      check-type-assertions: true   # `v, _ := x.(T)` is a bug waiting to happen
+      check-blank: false
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+    govet:
+      disable:
+        - fieldalignment            # struct padding micro-optimisation, too noisy
+    gosec:
+      excludes:
+        - G104                        # duplicate of errcheck
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: errorf
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: indent-error-flow
+        - name: superfluous-else
+        - name: empty-block
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    # Ignore anything generated (mockgen, sqlc, etc.).
+    generated: lax
+    rules:
+      # Tests may ignore some errors and are exempt from security rules.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+          - bodyclose
+      # main.go files only wire things together.
+      - path: cmd/.*main\.go
+        linters:
+          - revive
+
 formatters:
   enable:
     - gofmt
     - goimports
+  settings:
+    gofmt:
+      simplify: true      # equivalent of gofmt -s
+    # goimports:
+    #   local-prefixes:
+    #     - github.com/<your-org>/taskflow   # uncomment after fixing the module path
+    #                                        # so project imports group separately
+
+# Cap noisy output so the CI log stays readable.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
