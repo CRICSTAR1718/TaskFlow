@@ -28,17 +28,17 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 }
 
 // Backoff returns the delay before retry number attempt (1-based): exponential
-// from base, capped at max, with up to 10% jitter.
-func Backoff(attempt int, base, max time.Duration) time.Duration {
+// from base, capped at maxBackoff, with up to 10% jitter.
+func Backoff(attempt int, base, maxBackoff time.Duration) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
 	d := base
-	for i := 1; i < attempt && d < max; i++ {
+	for i := 1; i < attempt && d < maxBackoff; i++ {
 		d *= 2
 	}
-	if d > max {
-		d = max
+	if d > maxBackoff {
+		d = maxBackoff
 	}
-	return d + time.Duration(rand.Int63n(int64(d)/10+1))
+	return d + time.Duration(rand.Int63n(int64(d)/10+1)) //nolint:gosec // jitter only; not security-sensitive
 }
