@@ -25,6 +25,8 @@ env:
   # Used by the Go test job. Matches the service containers below.
   DATABASE_URL: postgres://taskflow:taskflow@localhost:5432/taskflow?sslmode=disable
   REDIS_ADDR: localhost:6379
+  # Static binaries for build/lint. NOTE: the test job overrides this to 1,
+  # because `go test -race` requires cgo.
   CGO_ENABLED: "0"
 
 jobs:
@@ -73,6 +75,10 @@ jobs:
   test:
     name: Test (go test -race)
     runs-on: ubuntu-latest
+    # -race needs cgo, so this job overrides the global CGO_ENABLED=0.
+    # (Otherwise: "go: -race requires cgo" and the step exits with code 2.)
+    env:
+      CGO_ENABLED: "1"
 
     services:
       postgres:
