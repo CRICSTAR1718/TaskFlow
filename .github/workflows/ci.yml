@@ -1,18 +1,289 @@
-name: ci
+# TaskFlow â€” Continuous Integration
+# Owner: Vinay Pratap Singh (P0.4)
+#
+# Jobs:  lint (golangci-lint) Â· test (go test -race + postgres/redis) Â· build (cmd/*) Â· web (vite build) Â· ci-success (gate)
+# Copy this file to:  <repo-root>/.github/workflows/ci.yml
+
+name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
+
+# Least privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+# Kill superseded runs on the same branch/PR to save minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Used by the Go test job. Matches the service containers below.
+  DATABASE_URL: postgres://taskflow:taskflow@localhost:5432/taskflow?sslmode=disable
+  REDIS_ADDR: localhost:6379
+  # Static binaries for build/lint. NOTE: the test job overrides this to 1,
+  # because `go test -race` requires cgo.
+  CGO_ENABLED: "0"
 
 jobs:
-  go:
+  # ---------------------------------------------------------------- lint ----
+  lint:
+    name: Lint (golangci-lint)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test -race ./...
-      - uses: golangci/golangci-lint-action@v7
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      # Deletes any previous cache written by older action versions.
+      - name: Clean lint cache
+        run: rm -rf ~/.cache/golangci-lint
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --timeout=5m
+
+      - name: go vet
+        run: go vet ./...
+
+      # gofmt/goimports are enforced by golangci-lint (formatters section of
+      # .golangci.yml), but this gives a clear one-line failure reason too.
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -s -l . | grep -v '^vendor/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-ed. Run 'gofmt -s -w .'"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------- test ----
+  test:
+    name: Test (go test -race)
+    runs-on: ubuntu-latest
+    # -race needs cgo, so this job overrides the global CGO_ENABLED=0.
+    # (Otherwise: "go: -race requires cgo" and the step exits with code 2.)
+    env:
+      CGO_ENABLED: "1"
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: taskflow
+          POSTGRES_PASSWORD: taskflow
+          POSTGRES_DB: taskflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U taskflow -d taskflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      # The runner image does NOT ship redis-cli or psql, so we only use bash's
+      # /dev/tcp for the readiness probe - no extra binaries, no apt-get.
+      # (GitHub already waits for the service healthchecks before running steps;
+      #  this is a belt-and-braces check that the ports really accept connections.)
+      - name: Wait for Postgres and Redis
+        run: |
+          set -uo pipefail
+          wait_for_port() {
+            local name="$1" port="$2"
+            for _ in $(seq 1 60); do
+              if (echo > "/dev/tcp/127.0.0.1/${port}") 2>/dev/null; then
+                echo "${name} is accepting connections on 127.0.0.1:${port}"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::${name} never opened port ${port}"
+            return 1
+          }
+          wait_for_port Postgres 5432
+          wait_for_port Redis 6379
+
+      # Cache the golang-migrate CLI so we don't recompile it on every run.
+      - name: Cache migrate CLI
+        uses: actions/cache@v4
+        with:
+          path: ~/go/bin/migrate
+          key: migrate-cli-${{ runner.os }}-v4-postgres
+
+      - name: Run migrations
+        run: |
+          set -euo pipefail
+          if ! ls migrations/*.up.sql >/dev/null 2>&1; then
+            echo "::notice::No migrations/*.up.sql found - skipping migrations"
+            exit 0
+          fi
+
+          if [ ! -x "$(go env GOPATH)/bin/migrate" ]; then
+            echo "Installing golang-migrate..."
+            go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
+          fi
+
+          "$(go env GOPATH)/bin/migrate" -path migrations -database "$DATABASE_URL" up
+          echo "Migrations applied."
+
+      - name: Run tests
+        run: go test -race -covermode=atomic -coverprofile=coverage.out -timeout=10m ./...
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -n 20
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # --------------------------------------------------------------- build ----
+  build:
+    name: Build (cmd/*)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go mod download
+        run: go mod download
+
+      - name: Compile everything
+        run: go build ./...
+
+      - name: Build service binaries
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          if [ -z "$(ls -d cmd/*/ 2>/dev/null)" ]; then
+            echo "::notice::cmd/ is empty - nothing to build"
+            exit 0
+          fi
+          for dir in cmd/*/; do
+            name=$(basename "$dir")
+            echo "building $name"
+            go build -trimpath -ldflags="-s -w" -o "bin/$name" "./$dir"
+          done
+          ls -lh bin
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: taskflow-binaries
+          path: bin/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------- web ----
+  web:
+    name: Web (lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The React dashboard only exists from phase 3 onward - skip cleanly.
+      - name: Check whether web/ exists
+        id: check
+        run: |
+          if [ -f web/package.json ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "web/package.json found - running web checks"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No web/package.json - skipping web job"
+          fi
+
+      - name: Set up Node
+        if: steps.check.outputs.exists == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        if: steps.check.outputs.exists == 'true'
+        working-directory: web
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            echo "::warning::No package-lock.json - using npm install (slower, not reproducible)"
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Lint
+        if: steps.check.outputs.exists == 'true'
+        working-directory: web
+        run: npm run lint --if-present
+
+      - name: Type-check + build
+        if: steps.check.outputs.exists == 'true'
+        working-directory: web
+        run: npm run build
+
+  # ----------------------------------------------------------- ci-success ---
+  # Single required status check for branch protection on main:
+  # settings -> Branches -> require "CI success".
+  ci-success:
+    name: CI success
+    needs: [lint, test, build, web]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every job passed
+        run: |
+          echo '${{ toJSON(needs) }}'
+          if echo '${{ toJSON(needs) }}' | grep -Eq '"result": *"(failure|cancelled)"'; then
+            echo "::error::One or more CI jobs failed."
+            exit 1
+          fi
+          echo "All CI jobs passed (skipped jobs are OK)."
