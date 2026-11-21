@@ -1,20 +1,9 @@
-# Go
-/bin/
+bin/
+coverage.out
 *.exe
 *.test
-*.out
-coverage.*
-
-# Env
 .env
-
-# Web
+.DS_Store
+node_modules/
 web/node_modules/
 web/dist/
-
-# IDE / OS
-.idea/
-.vscode/
-.DS_Store
-
-docs/
