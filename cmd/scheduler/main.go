@@ -10,7 +10,9 @@ import (
 
 	"github.com/cricstar1718/taskflow/internal/config"
 	"github.com/cricstar1718/taskflow/internal/logging"
+	"github.com/cricstar1718/taskflow/internal/queue"
 	"github.com/cricstar1718/taskflow/internal/scheduler"
+	"github.com/cricstar1718/taskflow/internal/store"
 )
 
 const service = "scheduler"
@@ -36,7 +38,22 @@ func run() error {
 
 	log.Info("starting " + service)
 
-	if err := scheduler.Run(ctx, cfg, log); err != nil {
+	st, err := store.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	q := queue.NewRedis(cfg.RedisAddr)
+	defer func() { _ = q.Close() }()
+
+	if err := scheduler.Start(ctx, scheduler.Config{
+		Store:  st,
+		Queue:  q,
+		Locker: queue.NewLock(q),
+		Log:    log,
+		Tick:   cfg.SchedulerTick,
+	}); err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 
