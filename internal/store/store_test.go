@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -86,8 +88,17 @@ func TestCreateAndGetJob(t *testing.T) {
 	if got.Type != created.Type || got.Attempt != 0 {
 		t.Fatalf("unexpected job: %+v", got)
 	}
-	if string(got.Payload) != `{"a":1}` {
-		t.Fatalf("payload = %s", got.Payload)
+	// jsonb does not preserve byte formatting: Postgres normalises it to
+	// `{"a": 1}`. Compare the decoded values, not the raw bytes.
+	var gotPayload, wantPayload any
+	if err := json.Unmarshal(got.Payload, &gotPayload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"a":1}`), &wantPayload); err != nil {
+		t.Fatalf("decode want: %v", err)
+	}
+	if !reflect.DeepEqual(gotPayload, wantPayload) {
+		t.Fatalf("payload = %s, want {\"a\":1}", got.Payload)
 	}
 
 	if _, err := s.GetJob(ctx, uuid.New()); !errors.Is(err, ErrNotFound) {
