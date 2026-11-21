@@ -3,7 +3,11 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/cricstar1718/taskflow/internal/domain"
 )
@@ -30,26 +34,127 @@ type Queue interface {
 	// as in-flight for workerID. It returns "" when all queues are empty.
 	Claim(ctx context.Context, workerID string) (jobID string, err error)
 	Ack(ctx context.Context, workerID, jobID string) error
+	// Requeue puts a job back, e.g. when a worker dies mid-run.
+	Requeue(ctx context.Context, jobID string, p domain.Priority) error
+	// InFlight lists the job IDs a worker claims to be running.
+	InFlight(ctx context.Context, workerID string) ([]string, error)
+	// Depths reports how many jobs are waiting per priority.
+	Depths(ctx context.Context) (map[domain.Priority]int64, error)
 }
 
-// Redis is a Queue backed by Redis. The go-redis client is wired in later.
+// ErrEmpty is returned by Claim when no job is waiting.
+var ErrEmpty = errors.New("queue: empty")
+
+// claimScript pops the highest-priority non-empty queue atomically and records
+// the job as in-flight for the worker. Score is the enqueue time in unix ms, so
+// ZPOPMIN yields FIFO within a priority.
+//
+// KEYS[1..3] = queue keys for high, normal, low
+// KEYS[4]    = inflight key for this worker
+// ARGV[1]    = score used when re-scoring (kept for clarity)
+var claimScript = redis.NewScript(`
+for i = 1, 3 do
+  local id = redis.call('ZPOPMIN', KEYS[i])
+  if id and id[1] then
+    redis.call('SADD', KEYS[4], id[1])
+    return id[1]
+  end
+end
+return nil
+`)
+
+// Redis is a Queue backed by Redis.
 type Redis struct {
-	url string
+	client *redis.Client
 }
 
-// NewRedis creates a Redis queue.
-func NewRedis(url string) *Redis { return &Redis{url: url} }
+// NewRedis connects lazily; Ping is not performed here so a temporarily
+// unavailable Redis does not prevent the scheduler from starting.
+func NewRedis(addr string) *Redis {
+	return &Redis{client: redis.NewClient(&redis.Options{Addr: addr})}
+}
+
+// NewRedisFromClient lets tests inject a client (e.g. a miniredis-backed one).
+func NewRedisFromClient(c *redis.Client) *Redis { return &Redis{client: c} }
 
 var _ Queue = (*Redis)(nil)
 
+// Close releases the underlying connection pool.
+func (r *Redis) Close() error { return r.client.Close() }
+
+// Ping verifies Redis is reachable.
+func (r *Redis) Ping(ctx context.Context) error {
+	if err := r.client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("queue ping: %w", err)
+	}
+	return nil
+}
+
+// Enqueue adds a job to its priority queue. Score is now in unix ms.
 func (r *Redis) Enqueue(ctx context.Context, jobID string, p domain.Priority) error {
-	return fmt.Errorf("enqueue %s: not implemented", jobID)
+	score := float64(time.Now().UnixMilli())
+	if err := r.client.ZAdd(ctx, Key(p), redis.Z{Score: score, Member: jobID}).Err(); err != nil {
+		return fmt.Errorf("enqueue %s: %w", jobID, err)
+	}
+	return nil
 }
 
+// Claim atomically pops the next job and marks it in-flight.
 func (r *Redis) Claim(ctx context.Context, workerID string) (string, error) {
-	return "", nil
+	keys := []string{
+		Key(domain.PriorityHigh),
+		Key(domain.PriorityNormal),
+		Key(domain.PriorityLow),
+		InflightKey(workerID),
+	}
+	res, err := claimScript.Run(ctx, r.client, keys).Result()
+	if errors.Is(err, redis.Nil) {
+		return "", ErrEmpty
+	}
+	if err != nil {
+		return "", fmt.Errorf("claim: %w", err)
+	}
+	id, ok := res.(string)
+	if !ok || id == "" {
+		return "", ErrEmpty
+	}
+	return id, nil
 }
 
+// Ack clears the in-flight marker after a job is finished.
 func (r *Redis) Ack(ctx context.Context, workerID, jobID string) error {
-	return fmt.Errorf("ack %s: not implemented", jobID)
+	if err := r.client.SRem(ctx, InflightKey(workerID), jobID).Err(); err != nil {
+		return fmt.Errorf("ack %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// Requeue pushes a job back onto its priority queue.
+func (r *Redis) Requeue(ctx context.Context, jobID string, p domain.Priority) error {
+	if err := r.Enqueue(ctx, jobID, p); err != nil {
+		return fmt.Errorf("requeue %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// InFlight returns the in-flight job IDs for a worker.
+func (r *Redis) InFlight(ctx context.Context, workerID string) ([]string, error) {
+	ids, err := r.client.SMembers(ctx, InflightKey(workerID)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("inflight %s: %w", workerID, err)
+	}
+	return ids, nil
+}
+
+// Depths returns the number of waiting jobs per priority.
+func (r *Redis) Depths(ctx context.Context) (map[domain.Priority]int64, error) {
+	out := make(map[domain.Priority]int64, 3)
+	for _, p := range []domain.Priority{domain.PriorityHigh, domain.PriorityNormal, domain.PriorityLow} {
+		n, err := r.client.ZCard(ctx, Key(p)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("depth %s: %w", p.String(), err)
+		}
+		out[p] = n
+	}
+	return out, nil
 }
