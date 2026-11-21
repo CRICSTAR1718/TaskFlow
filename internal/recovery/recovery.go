@@ -8,7 +8,7 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/your-org/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/config"
 )
 
 // Run sweeps until ctx is cancelled.

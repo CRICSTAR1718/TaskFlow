@@ -3,7 +3,7 @@ package queue
 import (
 	"testing"
 
-	"github.com/your-org/taskflow/internal/domain"
+	"github.com/cricstar1718/taskflow/internal/domain"
 )
 
 func TestKeys(t *testing.T) {

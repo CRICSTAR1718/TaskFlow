@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/your-org/taskflow/internal/config"
-	"github.com/your-org/taskflow/internal/ws"
+	"github.com/cricstar1718/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/ws"
 )
 
 // Run serves HTTP until ctx is cancelled, then shuts down gracefully.

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/your-org/taskflow/internal/handlers" // registers sample handlers
+	_ "github.com/cricstar1718/taskflow/internal/handlers" // registers sample handlers
 )
 
 func TestExecute(t *testing.T) {

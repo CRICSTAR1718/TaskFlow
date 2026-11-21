@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/your-org/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/config"
 )
 
 // Run starts the pool and heartbeat, and returns once ctx is cancelled and
