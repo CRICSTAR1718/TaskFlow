@@ -400,9 +400,11 @@ func (s *Store) CreateRun(ctx context.Context, run domain.JobRun) (domain.JobRun
 	if status == "" {
 		status = domain.StatusRunning
 	}
-	startedAt := run.StartedAt
-	if startedAt.IsZero() {
-		startedAt = time.Now()
+	// Let Postgres stamp started_at when the caller did not supply one, so
+	// started_at and finished_at come from the same clock.
+	var startedAt any
+	if !run.StartedAt.IsZero() {
+		startedAt = run.StartedAt
 	}
 	errMsg := ""
 	if run.Error != nil {
@@ -413,7 +415,7 @@ func (s *Store) CreateRun(ctx context.Context, run domain.JobRun) (domain.JobRun
 	err := s.db.QueryRow(ctx,
 		`INSERT INTO job_runs (job_id, worker_id, attempt, status, error,
 			started_at, finished_at)
-		 VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)
+		 VALUES ($1::uuid, $2, $3, $4, $5, COALESCE($6::timestamptz, clock_timestamp()), $7)
 		 RETURNING id, started_at`,
 		run.JobID.String(), run.WorkerID, run.Attempt, string(status), errMsg,
 		startedAt, run.FinishedAt,
@@ -430,8 +432,11 @@ func (s *Store) CreateRun(ctx context.Context, run domain.JobRun) (domain.JobRun
 // Returns ErrNotFound when the run does not exist.
 func (s *Store) FinishRun(ctx context.Context, runID uuid.UUID, status domain.Status, errMsg string) error {
 	tag, err := s.db.Exec(ctx,
+		// clock_timestamp(), not now(): now() is frozen for the whole
+		// transaction, so a run created and finished in one tx would get
+		// identical timestamps (and a non-positive duration).
 		`UPDATE job_runs
-		 SET status = $2, error = $3, finished_at = now()
+		 SET status = $2, error = $3, finished_at = clock_timestamp()
 		 WHERE id = $1::uuid`,
 		runID.String(), string(status), errMsg)
 	if err != nil {
