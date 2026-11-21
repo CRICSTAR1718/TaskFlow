@@ -4,7 +4,7 @@ package events
 import (
 	"context"
 
-	"github.com/your-org/taskflow/internal/domain"
+	"github.com/cricstar1718/taskflow/internal/domain"
 )
 
 // Publisher emits events.

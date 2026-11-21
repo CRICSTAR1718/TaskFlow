@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/your-org/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/config"
 )
 
 func TestRouter(t *testing.T) {

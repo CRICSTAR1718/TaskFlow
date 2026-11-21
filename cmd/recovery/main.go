@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/your-org/taskflow/internal/config"
-	"github.com/your-org/taskflow/internal/logging"
-	"github.com/your-org/taskflow/internal/recovery"
+	"github.com/cricstar1718/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/logging"
+	"github.com/cricstar1718/taskflow/internal/recovery"
 )
 
 const service = "recovery"

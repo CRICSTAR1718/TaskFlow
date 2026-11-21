@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/your-org/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/config"
 )
 
 // NewRouter wires routes and middleware. chi replaces ServeMux later.

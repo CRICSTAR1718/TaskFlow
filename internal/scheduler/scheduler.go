@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/your-org/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/config"
 )
 
 // Run polls until ctx is cancelled.

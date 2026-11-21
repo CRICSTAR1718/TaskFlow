@@ -1,4 +1,4 @@
-module github.com/your-org/taskflow
+module github.com/cricstar1718/taskflow
 
 go 1.22
 
