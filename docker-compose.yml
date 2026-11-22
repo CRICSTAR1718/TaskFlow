@@ -1,4 +1,32 @@
-# Infrastructure only; app services are added later.
+# `docker compose up -d --wait` brings up the whole system: database, queue,
+# schema, api, scheduler, recovery and a worker. Scaling workers works out of the
+# box because each one generates its own id:
+#
+#   docker compose up -d --scale worker=3
+#
+# Everything reads the same DATABASE_URL / REDIS_ADDR / API_KEY from .env, so
+# the host-run services (go run ./cmd/api) and the containers agree.
+
+x-service-defaults: &service-defaults
+  build:
+    context: .
+    dockerfile: deploy/Dockerfile
+  image: taskflow:local
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+  environment: &service-env
+    DATABASE_URL: postgres://${POSTGRES_USER:-taskflow}:${POSTGRES_PASSWORD:-taskflow}@postgres:5432/${POSTGRES_DB:-taskflow}?sslmode=disable
+    REDIS_ADDR: redis:6379
+    API_KEY: ${API_KEY:-dev-api-key}
+    LOG_LEVEL: ${LOG_LEVEL:-info}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
 services:
   postgres:
     image: postgres:16
@@ -28,11 +56,84 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # One-shot: applies migrations/ and exits. Everything else waits for it to
+  # finish, so `docker compose up` on a fresh clone has a schema by the time the
+  # api starts - previously this step needed a golang-migrate binary on the host.
+  migrate:
+    <<: *service-defaults
+    restart: "no"
+    command: ["./migrate", "-dir", "/migrations"]
+    volumes:
+      - ./migrations:/migrations:ro
+
+  api:
+    <<: *service-defaults
+    command: ["./api"]
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    environment:
+      <<: *service-env
+      HTTP_ADDR: ":8080"
+      # Same-origin via the web container (Caddy proxies /api and /ws), plus the
+      # vite dev server for local work.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000,http://localhost:5173}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *service-defaults
+    command: ["./scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Fails jobs whose worker stopped heartbeating. Count remains 1: two recovery
+  # managers would race on the same rows.
+  recovery:
+    <<: *service-defaults
+    command: ["./recovery"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *service-defaults
+    command: ["./worker"]
+    environment:
+      <<: *service-env
+      # Left unset so each replica gets <hostname>-<random>; setting one id here
+      # would make --scale worker=3 register three workers with the same name.
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-50}
+      HEARTBEAT_INTERVAL: ${HEARTBEAT_INTERVAL:-5s}
+      HEARTBEAT_TTL: ${HEARTBEAT_TTL:-15s}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   # The dashboard. Serves the static build and proxies /api and /ws to `api`,
   # so the browser only ever talks to one origin - no CORS, no mixed content.
   web:
     build:
       context: ./web
+    image: taskflow-web:local
     ports:
       - "${WEB_PORT:-3000}:80"
     depends_on:
