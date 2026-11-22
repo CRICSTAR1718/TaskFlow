@@ -158,3 +158,31 @@ func (r *Redis) Depths(ctx context.Context) (map[domain.Priority]int64, error) {
 	}
 	return out, nil
 }
+
+// Client returns the underlying client, for callers that need a raw command
+// outside this package's API (the worker heartbeat writes a key with a TTL).
+func (r *Redis) Client() *redis.Client { return r.client }
+
+// Heartbeats reports, for each worker ID, whether its heartbeat key still
+// exists. This is the only correct source of truth for liveness: the
+// workers.last_heartbeat column is only written when a worker registers, while
+// the key is refreshed every heartbeat and expiring it is exactly what tells
+// recovery a worker is gone.
+func (r *Redis) Heartbeats(ctx context.Context, workerIDs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(workerIDs))
+	if len(workerIDs) == 0 {
+		return out, nil
+	}
+	pipe := r.client.Pipeline()
+	cmds := make(map[string]*redis.IntCmd, len(workerIDs))
+	for _, id := range workerIDs {
+		cmds[id] = pipe.Exists(ctx, HeartbeatKey(id))
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("heartbeats: %w", err)
+	}
+	for id, cmd := range cmds {
+		out[id] = cmd.Val() == 1
+	}
+	return out, nil
+}

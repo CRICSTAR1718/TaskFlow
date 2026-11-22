@@ -24,6 +24,7 @@ type fakeStore struct {
 	runs       []domain.JobRun
 	finishes   []domain.Status
 	attempt    int
+	nextRuns   map[uuid.UUID]*time.Time
 }
 
 func (f *fakeStore) GetJob(_ context.Context, _ uuid.UUID) (domain.Job, error) {
@@ -50,6 +51,14 @@ func (f *fakeStore) FinishRun(_ context.Context, _ uuid.UUID, s domain.Status, _
 func (f *fakeStore) IncrementAttempt(_ context.Context, _ uuid.UUID) (int, error) {
 	f.attempt++
 	return f.attempt, nil
+}
+
+func (f *fakeStore) SetNextRun(_ context.Context, id uuid.UUID, at *time.Time) error {
+	if f.nextRuns == nil {
+		f.nextRuns = map[uuid.UUID]*time.Time{}
+	}
+	f.nextRuns[id] = at
+	return nil
 }
 
 func (f *fakeStore) UpdateStatus(_ context.Context, _ uuid.UUID, from, to domain.Status) error {
@@ -143,6 +152,13 @@ func TestExecuteFailureSchedulesRetry(t *testing.T) {
 	}
 	if len(q.acks) != 1 {
 		t.Fatalf("claim was not released: acks = %v", q.acks)
+	}
+	at, ok := st.nextRuns[j.ID]
+	if !ok || at == nil {
+		t.Fatal("next_run_at was not stored, so the backoff delay is never applied")
+	}
+	if !at.After(time.Now()) {
+		t.Fatalf("next_run_at = %v, want a time in the future", at)
 	}
 }
 

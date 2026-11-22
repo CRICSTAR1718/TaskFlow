@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/cricstar1718/taskflow/internal/config"
 )
 
@@ -14,6 +16,11 @@ import (
 type Deps struct {
 	Jobs  JobSource
 	Queue Claimer
+	// Heartbeats is optional; when absent the worker still runs but liveness
+	// cannot be reported, so it is a misconfiguration in any real deployment.
+	Heartbeats *redis.Client
+	// Liveness persists heartbeats to Postgres for humans. Optional.
+	Liveness BeatStore
 }
 
 // Run starts the claim loop, the executor pool and the heartbeat, and returns
@@ -22,6 +29,14 @@ func Run(ctx context.Context, cfg config.Config, deps Deps, log *slog.Logger) er
 	var wg sync.WaitGroup
 
 	hb := NewHeartbeat(cfg.WorkerID, cfg.HeartbeatInterval, cfg.HeartbeatTTL, log)
+	if deps.Heartbeats != nil {
+		hb = hb.WithRedis(deps.Heartbeats)
+	} else {
+		log.Warn("no redis client for heartbeats - this worker will look dead to recovery")
+	}
+	if deps.Liveness != nil {
+		hb = hb.WithStore(deps.Liveness)
+	}
 	wg.Add(1)
 	go func() { defer wg.Done(); hb.Run(ctx) }()
 

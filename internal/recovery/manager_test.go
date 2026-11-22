@@ -47,6 +47,7 @@ type fakeQueue struct {
 	enqueued []string
 	fail     bool
 	inflight map[string][]string
+	acked    []string
 }
 
 func (f *fakeQueue) Enqueue(_ context.Context, id string, _ domain.Priority) error {
@@ -66,6 +67,11 @@ func (f *fakeQueue) InFlight(_ context.Context, workerID string) ([]string, erro
 	return f.inflight[workerID], nil
 }
 
+func (f *fakeQueue) Ack(_ context.Context, workerID, jobID string) error {
+	f.acked = append(f.acked, workerID+"/"+jobID)
+	return nil
+}
+
 func (f *fakeQueue) Depths(context.Context) (map[domain.Priority]int64, error) {
 	if f.fail {
 		return nil, errors.New("redis down")
@@ -73,10 +79,18 @@ func (f *fakeQueue) Depths(context.Context) (map[domain.Priority]int64, error) {
 	return map[domain.Priority]int64{}, nil
 }
 
-type fakeWorkers struct{ workers []domain.WorkerInfo }
+type fakeWorkers struct {
+	workers    []domain.WorkerInfo
+	markedDead int
+}
 
 func (f *fakeWorkers) ListWorkers(context.Context) ([]domain.WorkerInfo, error) {
 	return f.workers, nil
+}
+
+func (f *fakeWorkers) MarkWorkerDead(context.Context, string) error {
+	f.markedDead++
+	return nil
 }
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -295,4 +309,43 @@ func (failingStore) FindStaleRunning(context.Context, time.Duration, int) ([]sto
 
 func (failingStore) Requeue(context.Context, uuid.UUID, time.Time, string, bool) error {
 	return errors.New("connection refused")
+}
+
+func TestReclaimFlagsTheDeadWorker(t *testing.T) {
+	j := job(1, 3)
+	j.WorkerID = "worker-dead"
+	w := &fakeWorkers{}
+	m := newManager(&fakeStore{stale: []store.RecoverableJob{j}}, &fakeQueue{}, w)
+
+	if _, err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if w.markedDead != 1 {
+		t.Fatalf("marked %d workers dead, want 1", w.markedDead)
+	}
+}
+
+func TestDrainClearsInFlightEntries(t *testing.T) {
+	dead := "worker-dead"
+	q := &fakeQueue{inflight: map[string][]string{dead: {"job-a", "job-b"}}}
+	m := newManager(&fakeStore{}, q, &fakeWorkers{workers: []domain.WorkerInfo{
+		{ID: dead, LastHeartbeat: time.Now().Add(-time.Hour)},
+	}})
+
+	if _, err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if len(q.acked) != 2 {
+		t.Fatalf("cleared %d in-flight entries, want 2: an uncleared member is re-queued on every sweep", len(q.acked))
+	}
+
+	// A second sweep must not touch the same dead worker again.
+	q2 := &fakeQueue{inflight: map[string][]string{dead: {"job-a"}}}
+	before := len(q2.enqueued)
+	if _, err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep #2: %v", err)
+	}
+	if len(q2.enqueued) != before {
+		t.Fatal("a swept dead worker was drained twice")
+	}
 }

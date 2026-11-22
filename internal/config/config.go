@@ -19,6 +19,7 @@ type Config struct {
 	RedisAddr   string
 	APIKey      string
 	HTTPAddr    string
+	WebOrigin   string // allowed CORS origin for the dashboard; empty disables CORS
 
 	WorkerConcurrency int
 	WorkerID          string
@@ -46,6 +47,7 @@ func LoadFrom(lookup func(string) (string, bool)) (Config, error) {
 		DatabaseURL: r.str("DATABASE_URL", "postgres://taskflow:taskflow@localhost:5432/taskflow?sslmode=disable"),
 		RedisAddr:   r.str("REDIS_ADDR", "localhost:6379"),
 		APIKey:      r.str("API_KEY", ""),
+		WebOrigin:   r.str("WEB_ORIGIN", ""),
 		HTTPAddr:    r.str("HTTP_ADDR", ":8080"),
 
 		WorkerConcurrency: r.integer("WORKER_CONCURRENCY", 50),

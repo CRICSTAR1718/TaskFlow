@@ -26,6 +26,7 @@ type JobSource interface {
 	FinishRun(ctx context.Context, runID uuid.UUID, status domain.Status, errMsg string) error
 	IncrementAttempt(ctx context.Context, id uuid.UUID) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, from, to domain.Status) error
+	SetNextRun(ctx context.Context, id uuid.UUID, nextRunAt *time.Time) error
 }
 
 // Claimer is the slice of the queue the runner needs. Claim returns
@@ -248,8 +249,12 @@ func (r *Runner) finishFailure(ctx context.Context, id uuid.UUID, job domain.Job
 	nextAt := time.Now().Add(delay)
 	if err := r.store.UpdateStatus(ctx, id, domain.StatusRunning, domain.StatusRetrying); err != nil {
 		r.log.Warn("mark retrying", slog.Any("error", err))
-		r.log.Debug("retry scheduled", slog.String("job_id", id.String()), slog.Time("run_at", nextAt))
 		return
+	}
+	// Store the delay. Without this the row keeps its old next_run_at and the
+	// recovery sweep retries immediately, so the backoff is never applied.
+	if err := r.store.SetNextRun(ctx, id, &nextAt); err != nil {
+		r.log.Warn("set next run", slog.String("job_id", id.String()), slog.Any("error", err))
 	}
 	r.log.Warn("job failed, will retry",
 		slog.String("job_id", id.String()),

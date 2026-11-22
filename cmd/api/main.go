@@ -11,6 +11,8 @@ import (
 	"github.com/cricstar1718/taskflow/internal/api"
 	"github.com/cricstar1718/taskflow/internal/config"
 	"github.com/cricstar1718/taskflow/internal/logging"
+	"github.com/cricstar1718/taskflow/internal/queue"
+	"github.com/cricstar1718/taskflow/internal/store"
 )
 
 const service = "api"
@@ -36,7 +38,16 @@ func run() error {
 
 	log.Info("starting " + service)
 
-	if err := api.Run(ctx, cfg, log); err != nil {
+	st, err := store.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	q := queue.NewRedis(cfg.RedisAddr)
+	defer func() { _ = q.Close() }()
+
+	if err := api.Run(ctx, cfg, api.Deps{Store: st, Queue: q}, log); err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 
