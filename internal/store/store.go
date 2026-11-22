@@ -341,8 +341,8 @@ func (s *Store) exists(ctx context.Context, id uuid.UUID) (bool, error) {
 
 // FetchDueJobs locks up to limit due jobs (PENDING or RETRYING whose
 // next_run_at has arrived), highest priority first. It uses SELECT ... FOR
-// UPDATE SKIP LOCKED, so it must run inside a transaction Ã¢â‚¬â€ use Begin and the
-// returned Store Ã¢â‚¬â€ typically followed by MarkQueued in the same transaction.
+// UPDATE SKIP LOCKED, so it must run inside a transaction -- use Begin and the
+// returned Store -- typically followed by MarkQueued in the same transaction.
 func (s *Store) FetchDueJobs(ctx context.Context, now time.Time, limit int) ([]domain.Job, error) {
 	if limit <= 0 {
 		limit = defaultLimit
@@ -385,9 +385,16 @@ func (s *Store) MarkQueued(ctx context.Context, ids []uuid.UUID) error {
 	for i, id := range ids {
 		strs[i] = id.String()
 	}
+	// Only rows still waiting may be marked QUEUED. The scheduler decided these
+	// ids were due a moment ago; a worker can already have claimed and finished
+	// one of them since (the queue entry usually reaches a worker before this
+	// statement runs). Without the status guard this UPDATE reset a SUCCEEDED or
+	// DEAD job back to QUEUED, where nothing would ever run it again - the job
+	// silently stayed QUEUED forever.
 	if _, err := s.db.Exec(ctx,
 		`UPDATE jobs SET status = 'QUEUED'
-		 WHERE id IN (SELECT unnest($1::text[])::uuid)`,
+		 WHERE id IN (SELECT unnest($1::text[])::uuid)
+		   AND status IN ('PENDING', 'RETRYING')`,
 		strs); err != nil {
 		return fmt.Errorf("mark queued: %w", err)
 	}
@@ -646,12 +653,19 @@ func (s *Store) FindStaleRunning(ctx context.Context, staleAfter time.Duration, 
 		limit = defaultLimit
 	}
 	rows, err := s.db.Query(ctx,
+		// r.started_at < $1 as well as the heartbeat check: a run that began less
+		// than staleAfter ago cannot have "stopped heartbeating", because
+		// staleAfter is by definition how long a worker is allowed to stay quiet.
+		// Without this, deleting or losing a workers row (a demo reset, an
+		// operator tidying up, a restored dump) made every job running at that
+		// instant look abandoned, and recovery reclaimed jobs that were fine.
 		`SELECT j.id, j.priority::int, j.attempt, j.max_retries, j.last_error,
 		        COALESCE(r.worker_id, '')
 		 FROM jobs j
 		 JOIN job_runs r ON r.job_id = j.id
 		 WHERE j.status = 'RUNNING'
 		   AND r.finished_at IS NULL
+		   AND r.started_at < $1
 		   AND NOT EXISTS (
 		       SELECT 1 FROM workers w
 		       WHERE w.id = r.worker_id
@@ -733,14 +747,23 @@ func (s *Store) Requeue(ctx context.Context, id uuid.UUID, nextRunAt time.Time, 
 // Beat refreshes workers.last_heartbeat and marks the worker alive. It reports
 // ErrNotFound when the row is gone (deleted while the worker was running).
 func (s *Store) Beat(ctx context.Context, workerID string) error {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE workers SET last_heartbeat = clock_timestamp(), alive = true WHERE id = $1`,
+	// Upsert, not UPDATE. A worker heartbeats until it exits, so its row has to
+	// exist for as long as it runs - but the row can vanish underneath it (a
+	// demo reset, an operator truncating stale rows, a restored dump). With a
+	// plain UPDATE the heartbeat then failed with "not found" forever, and
+	// recovery treated the missing row as a dead worker and reclaimed jobs that
+	// were running fine.
+	//
+	// hostname and concurrency are left alone on conflict: they were recorded at
+	// registration and do not change; only liveness and the timestamp do.
+	_, err := s.db.Exec(ctx,
+		`INSERT INTO workers (id, hostname, concurrency, alive, last_heartbeat)
+		 VALUES ($1, '', 0, true, clock_timestamp())
+		 ON CONFLICT (id) DO UPDATE
+		 SET last_heartbeat = clock_timestamp(), alive = true`,
 		workerID)
 	if err != nil {
 		return fmt.Errorf("beat: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
 	}
 	return nil
 }

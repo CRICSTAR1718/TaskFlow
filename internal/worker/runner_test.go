@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cricstar1718/taskflow/internal/domain"
+	"github.com/cricstar1718/taskflow/internal/store"
 )
 
 // ---------------------------------------------------------------- fakes ----
@@ -25,6 +26,14 @@ type fakeStore struct {
 	finishes   []domain.Status
 	attempt    int
 	nextRuns   map[uuid.UUID]*time.Time
+
+	// matchOnlyFrom makes all but one guarded transition report a conflict, so a
+	// test can pin down which source status the claim matched.
+	matchOnlyFrom domain.Status
+	// neverMatches makes every guarded transition lose the race.
+	neverMatches bool
+	// deleted makes the store report the job is gone.
+	deleted bool
 }
 
 func (f *fakeStore) GetJob(_ context.Context, _ uuid.UUID) (domain.Job, error) {
@@ -67,6 +76,15 @@ func (f *fakeStore) UpdateStatus(_ context.Context, _ uuid.UUID, from, to domain
 	}
 	f.statusFrom = append(f.statusFrom, from)
 	f.statusTo = append(f.statusTo, to)
+	if f.deleted {
+		return store.ErrNotFound
+	}
+	if f.neverMatches {
+		return store.ErrConflict
+	}
+	if f.matchOnlyFrom != "" && from != f.matchOnlyFrom {
+		return store.ErrConflict
+	}
 	return nil
 }
 

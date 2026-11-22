@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/cricstar1718/taskflow/internal/domain"
 	"github.com/cricstar1718/taskflow/internal/events"
 	"github.com/cricstar1718/taskflow/internal/queue"
+	"github.com/cricstar1718/taskflow/internal/store"
 )
 
 // ErrNoWork is returned by Claim when every priority queue is empty.
@@ -191,9 +193,8 @@ func (r *Runner) execute(ctx context.Context, jobID string) {
 		return
 	}
 
-	if err := r.store.UpdateStatus(bg, id, domain.StatusQueued, domain.StatusRunning); err != nil {
-		// Lost a race (cancelled by a user, or already picked up elsewhere).
-		r.log.Warn("job is not QUEUED, dropping claim",
+	if err := r.claim(bg, id, job.Status); err != nil {
+		r.log.Warn("job is not claimable, dropping claim",
 			slog.String("job_id", jobID), slog.String("status", string(job.Status)), slog.Any("error", err))
 		r.release(bg, jobID)
 		return
@@ -313,6 +314,62 @@ func (r *Runner) finishFailure(ctx context.Context, id uuid.UUID, job domain.Job
 }
 
 // release clears the in-flight marker. Errors are logged, never fatal.
+// errNotClaimable marks a claim that was abandoned because the job belongs to
+// someone else now. Kept as a sentinel so callers and tests can tell it apart
+// from a store failure.
+var errNotClaimable = errors.New("not claimable")
+
+// waitingStatuses are the states a job can legitimately be in when the worker is
+// handed it. The scheduler enqueues to Redis and only then marks the rows QUEUED
+// (so a Redis outage cannot lose a job), and retries take the same path, so a
+// fast worker routinely sees PENDING or RETRYING rather than QUEUED. Dropping
+// the claim in that window left the job stuck: the queue entry was consumed, and
+// the scheduler only re-fires jobs whose next_run_at has passed.
+var waitingStatuses = []domain.Status{
+	domain.StatusQueued, domain.StatusPending, domain.StatusRetrying,
+}
+
+// claim moves a job to RUNNING. Every transition is guarded by the source
+// status, so exactly one worker can win: if two queue entries for the same job
+// are in flight, only the first UPDATE matches a row. A job in any other state
+// (RUNNING, SUCCEEDED, DEAD, CANCELLED) belongs to someone else or is finished,
+// and the claim is dropped.
+//
+// observed is the status just read for the job. It is tried first because it is
+// almost always still current; the rest of the waiting states cover the case
+// where the scheduler moved the row in between.
+func (r *Runner) claim(ctx context.Context, id uuid.UUID, observed domain.Status) error {
+	for _, from := range claimOrder(observed) {
+		err := r.store.UpdateStatus(ctx, id, from, domain.StatusRunning)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, store.ErrNotFound) {
+			// The job was deleted; no point trying the other states.
+			return err
+		}
+	}
+	return fmt.Errorf("%w: could not move the job to RUNNING from any waiting state", errNotClaimable)
+}
+
+// claimOrder lists the source statuses to try, observed first when it is one of
+// them. A job that is already RUNNING, SUCCEEDED, DEAD or CANCELLED is never a
+// candidate, whatever it looked like a moment ago.
+func claimOrder(observed domain.Status) []domain.Status {
+	order := make([]domain.Status, 0, len(waitingStatuses))
+	for _, s := range waitingStatuses {
+		if s == observed {
+			order = append(order, s)
+		}
+	}
+	for _, s := range waitingStatuses {
+		if s != observed {
+			order = append(order, s)
+		}
+	}
+	return order
+}
+
 func (r *Runner) release(ctx context.Context, jobID string) {
 	if err := r.queue.Ack(ctx, r.workerID, jobID); err != nil {
 		r.log.Warn("ack failed", slog.String("job_id", jobID), slog.Any("error", err))
