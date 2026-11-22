@@ -14,6 +14,9 @@ type Pool struct {
 	jobs chan Task
 }
 
+// Size reports how many jobs the pool will run at once.
+func (p *Pool) Size() int { return p.size }
+
 // NewPool creates a pool of size concurrent workers.
 func NewPool(size int, exec *Executor, log *slog.Logger) *Pool {
 	if size < 1 {
