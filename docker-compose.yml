@@ -28,6 +28,16 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  # The dashboard. Serves the static build and proxies /api and /ws to `api`,
+  # so the browser only ever talks to one origin - no CORS, no mixed content.
+  web:
+    build:
+      context: ./web
+    ports:
+      - "${WEB_PORT:-3000}:80"
+    depends_on:
+      - api
+    restart: unless-stopped
 
 volumes:
   postgres_data:

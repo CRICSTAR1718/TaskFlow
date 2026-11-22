@@ -1,0 +1,22 @@
+# Serves the dashboard and proxies the API + websocket from the same origin,
+# which is why the client can use relative /api and /ws URLs and no CORS is
+# needed in production.
+:80 {
+	root * /srv
+	encode gzip
+
+	# The API lives in the compose network under the name "api".
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	# Websocket: Caddy upgrades automatically, but it must not be compressed.
+	handle /ws* {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		try_files {path} /index.html
+		file_server
+	}
+}
