@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -15,6 +18,24 @@ type middleware func(http.Handler) http.Handler
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+}
+
+// Hijack lets a wrapped handler take over the connection. Without this the
+// websocket upgrade fails, because websocket.Accept needs an http.Hijacker and
+// the embedded ResponseWriter hides the interface. Found by test, not by luck.
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("middleware: %T does not support hijacking", r.ResponseWriter)
+	}
+	return h.Hijack()
+}
+
+// Flush keeps SSE-style streaming working through the logger.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 func (r *statusRecorder) WriteHeader(code int) {

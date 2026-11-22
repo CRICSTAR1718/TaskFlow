@@ -38,3 +38,29 @@ type Event struct {
 	At       time.Time `json:"at"`
 	Error    string    `json:"error,omitempty"`
 }
+
+// MarshalJSON pins every event timestamp to UTC.
+//
+// time.Time writes whatever location is attached to the value, so an Event that
+// came back from the database would serialise as "2026-11-22T18:00:00+05:30" on a
+// machine in IST while the same instant on a CI box serialises as
+// "2026-11-22T12:30:00Z". Browsers parse both, but the dashboard sorts the
+// timeline as text, so one canonical form: RFC 3339, always UTC.
+func (e Event) MarshalJSON() ([]byte, error) {
+	type wireEvent struct {
+		JobID    uuid.UUID `json:"job_id"`
+		Status   Status    `json:"status"`
+		WorkerID string    `json:"worker_id,omitempty"`
+		Attempt  int       `json:"attempt"`
+		At       time.Time `json:"at"`
+		Error    string    `json:"error,omitempty"`
+	}
+	return json.Marshal(wireEvent{
+		JobID:    e.JobID,
+		Status:   e.Status,
+		WorkerID: e.WorkerID,
+		Attempt:  e.Attempt,
+		At:       e.At.UTC(),
+		Error:    e.Error,
+	})
+}

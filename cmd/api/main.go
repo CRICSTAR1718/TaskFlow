@@ -10,6 +10,7 @@ import (
 
 	"github.com/cricstar1718/taskflow/internal/api"
 	"github.com/cricstar1718/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/events"
 	"github.com/cricstar1718/taskflow/internal/logging"
 	"github.com/cricstar1718/taskflow/internal/queue"
 	"github.com/cricstar1718/taskflow/internal/store"
@@ -47,7 +48,7 @@ func run() error {
 	q := queue.NewRedis(cfg.RedisAddr)
 	defer func() { _ = q.Close() }()
 
-	if err := api.Run(ctx, cfg, api.Deps{Store: st, Queue: q}, log); err != nil {
+	if err := api.Run(ctx, cfg, api.Deps{Store: st, Queue: q, Events: events.NewRedis(q.Client())}, log); err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 
