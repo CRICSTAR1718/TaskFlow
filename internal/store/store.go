@@ -341,8 +341,8 @@ func (s *Store) exists(ctx context.Context, id uuid.UUID) (bool, error) {
 
 // FetchDueJobs locks up to limit due jobs (PENDING or RETRYING whose
 // next_run_at has arrived), highest priority first. It uses SELECT ... FOR
-// UPDATE SKIP LOCKED, so it must run inside a transaction — use Begin and the
-// returned Store — typically followed by MarkQueued in the same transaction.
+// UPDATE SKIP LOCKED, so it must run inside a transaction â€” use Begin and the
+// returned Store â€” typically followed by MarkQueued in the same transaction.
 func (s *Store) FetchDueJobs(ctx context.Context, now time.Time, limit int) ([]domain.Job, error) {
 	if limit <= 0 {
 		limit = defaultLimit
@@ -578,4 +578,154 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	}
 	st.AvgRunDurationLastHour = time.Duration(avgSeconds * float64(time.Second))
 	return st, nil
+}
+
+// RecoverableJob is a job that a recovery sweep may act on.
+type RecoverableJob struct {
+	ID         uuid.UUID
+	Priority   domain.Priority
+	Attempt    int
+	MaxRetries int
+	LastError  *string
+	WorkerID   string // set for stale jobs: who was holding it
+}
+
+// ClaimDue locks up to limit PENDING/RETRYING jobs whose next_run_at has
+// arrived and moves them to RUNNING, returning what it moved. The status write
+// happens inside the same transaction as the SELECT, so a crash between the two
+// cannot lose a job.
+//
+// Recovery calls this; the rows are immediately put back to RETRYING (with a
+// backoff) or DEAD by the caller, which is why RUNNING is only ever a
+// momentary state here. UPDATE ... RETURNING means every returned row is
+// exclusively ours even without FOR UPDATE SKIP LOCKED.
+func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int) ([]RecoverableJob, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	rows, err := s.db.Query(ctx,
+		`UPDATE jobs SET status = 'RUNNING', updated_at = clock_timestamp()
+		 WHERE id IN (
+			SELECT id FROM jobs
+			WHERE status IN ('PENDING','RETRYING')
+			  AND next_run_at IS NOT NULL
+			  AND next_run_at <= $1
+			ORDER BY priority DESC, next_run_at ASC, id
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		 )
+		 RETURNING id, priority::int, attempt, max_retries, last_error`,
+		now, limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim due: %w", err)
+	}
+	defer rows.Close()
+
+	out := []RecoverableJob{}
+	for rows.Next() {
+		var j RecoverableJob
+		var prio int
+		if err := rows.Scan(&j.ID, &prio, &j.Attempt, &j.MaxRetries, &j.LastError); err != nil {
+			return nil, fmt.Errorf("claim due: %w", err)
+		}
+		j.Priority = domain.Priority(prio)
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim due: %w", err)
+	}
+	return out, nil
+}
+
+// FindStaleRunning returns RUNNING jobs whose current run belongs to a worker
+// that has not heartbeated within staleAfter (or to a worker row that is gone).
+// Jobs with no open run are excluded: they are owned by a live worker that has
+// not written its run row yet.
+func (s *Store) FindStaleRunning(ctx context.Context, staleAfter time.Duration, limit int) ([]RecoverableJob, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT j.id, j.priority::int, j.attempt, j.max_retries, j.last_error,
+		        COALESCE(r.worker_id, '')
+		 FROM jobs j
+		 JOIN job_runs r ON r.job_id = j.id
+		 WHERE j.status = 'RUNNING'
+		   AND r.finished_at IS NULL
+		   AND NOT EXISTS (
+		       SELECT 1 FROM workers w
+		       WHERE w.id = r.worker_id
+		         AND w.last_heartbeat > $1
+		   )
+		 ORDER BY j.priority DESC, j.id
+		 LIMIT $2`,
+		time.Now().Add(-staleAfter), limit)
+	if err != nil {
+		return nil, fmt.Errorf("find stale running: %w", err)
+	}
+	defer rows.Close()
+
+	out := []RecoverableJob{}
+	for rows.Next() {
+		var j RecoverableJob
+		var prio int
+		if err := rows.Scan(&j.ID, &prio, &j.Attempt, &j.MaxRetries, &j.LastError, &j.WorkerID); err != nil {
+			return nil, fmt.Errorf("find stale running: %w", err)
+		}
+		j.Priority = domain.Priority(prio)
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("find stale running: %w", err)
+	}
+	return out, nil
+}
+
+// Requeue moves a job to RETRYING (or DEAD when terminal) with a new next_run_at,
+// records last_error and closes any open run as failed. It is unconditional on
+// the old status because the caller has already claimed the row; ErrNotFound is
+// returned when the job disappeared (deleted while we worked on it).
+func (s *Store) Requeue(ctx context.Context, id uuid.UUID, nextRunAt time.Time, lastError string, terminal bool) error {
+	status := domain.StatusRetrying
+	if terminal {
+		status = domain.StatusDead
+	}
+	if lastError == "" {
+		lastError = "attempt failed"
+	}
+
+	tx, txStore, err := s.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("requeue: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := txStore.db.Exec(ctx,
+		`UPDATE jobs
+		 SET status = $2::text,
+		     next_run_at = CASE WHEN $5::boolean THEN NULL ELSE $3::timestamptz END,
+		     last_error = $4::text,
+		     updated_at = clock_timestamp()
+		 WHERE id = $1::uuid`,
+		id.String(), string(status), nextRunAt, lastError, terminal)
+	if err != nil {
+		return fmt.Errorf("requeue: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+
+	// Close the abandoned run so durations and success-rate stats stay honest.
+	if _, err := txStore.db.Exec(ctx,
+		`UPDATE job_runs
+		 SET status = $2, error = $3, finished_at = clock_timestamp()
+		 WHERE job_id = $1::uuid AND finished_at IS NULL`,
+		id.String(), string(status), lastError); err != nil {
+		return fmt.Errorf("requeue: close run: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("requeue: commit: %w", err)
+	}
+	return nil
 }
