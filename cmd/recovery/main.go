@@ -10,7 +10,9 @@ import (
 
 	"github.com/cricstar1718/taskflow/internal/config"
 	"github.com/cricstar1718/taskflow/internal/logging"
+	"github.com/cricstar1718/taskflow/internal/queue"
 	"github.com/cricstar1718/taskflow/internal/recovery"
+	"github.com/cricstar1718/taskflow/internal/store"
 )
 
 const service = "recovery"
@@ -36,7 +38,16 @@ func run() error {
 
 	log.Info("starting " + service)
 
-	if err := recovery.Run(ctx, cfg, log); err != nil {
+	st, err := store.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+	defer st.Close()
+
+	q := queue.NewRedis(cfg.RedisAddr)
+	defer func() { _ = q.Close() }()
+
+	if err := recovery.Run(ctx, cfg, recovery.Deps{Store: st, Queue: q, Workers: st}, log); err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 
