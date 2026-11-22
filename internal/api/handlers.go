@@ -15,6 +15,7 @@ import (
 	"github.com/cricstar1718/taskflow/internal/domain"
 	"github.com/cricstar1718/taskflow/internal/handlers"
 	"github.com/cricstar1718/taskflow/internal/store"
+	"github.com/cricstar1718/taskflow/internal/ws"
 )
 
 // maxBodyBytes caps request bodies. A job payload is JSONB, not a file upload.
@@ -53,6 +54,12 @@ type API struct {
 	// staleAfter is how long a worker may go without a heartbeat before it is
 	// reported as not alive. Defaults to 30s (2x the default HEARTBEAT_TTL).
 	staleAfter time.Duration
+
+	// hub serves /ws. Nil disables live updates.
+	hub *ws.Hub
+	// apiKey authenticates the websocket query parameter; browsers cannot send
+	// an X-API-Key header on a handshake.
+	apiKey string
 }
 
 // apiError is the consistent error shape: {"error":{"code":...,"message":...}}.
@@ -329,31 +336,48 @@ func jobID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 
 // ------------------------------------------------------------ observability --
 
-func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
-	st, err := a.store.Stats(r.Context())
+// StatsView is the stats payload, shared by GET /api/v1/stats and the websocket
+// snapshot so the two can never disagree.
+func (a *API) StatsView(ctx context.Context) (any, error) {
+	st, err := a.store.Stats(ctx)
 	if err != nil {
-		a.fail(w, r, "stats", err)
-		return
+		return nil, err
 	}
-	depths, err := a.queue.Depths(r.Context())
+	depths, err := a.queue.Depths(ctx)
 	if err != nil {
-		a.fail(w, r, "queue depths", err)
-		return
+		return nil, err
 	}
 	byStatus := map[string]int64{}
 	for s, n := range st.JobsByStatus {
 		byStatus[string(s)] = n
 	}
-	queue := map[string]int64{}
+	queues := map[string]int64{}
 	for p, n := range depths {
-		queue[p.String()] = n
+		queues[p.String()] = n
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"jobs_by_status":                byStatus,
-		"queue_depths":                  queue,
+		"queue_depths":                  queues,
 		"runs_last_hour":                st.RunsLastHour,
 		"avg_run_duration_ms_last_hour": st.AvgRunDurationLastHour.Milliseconds(),
-	})
+		"ws_clients":                    a.clientCount(),
+	}, nil
+}
+
+func (a *API) clientCount() int {
+	if a.hub == nil {
+		return 0
+	}
+	return a.hub.Clients()
+}
+
+func (a *API) handleStats(w http.ResponseWriter, r *http.Request) {
+	view, err := a.StatsView(r.Context())
+	if err != nil {
+		a.fail(w, r, "stats", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (a *API) handleWorkers(w http.ResponseWriter, r *http.Request) {

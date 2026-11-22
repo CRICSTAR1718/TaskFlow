@@ -9,6 +9,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/cricstar1718/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/events"
 )
 
 // Deps are the collaborators cmd/worker passes in. Keeping them explicit
@@ -21,6 +22,8 @@ type Deps struct {
 	Heartbeats *redis.Client
 	// Liveness persists heartbeats to Postgres for humans. Optional.
 	Liveness BeatStore
+	// Events publishes status changes for the live dashboard. Optional.
+	Events events.Publisher
 }
 
 // Run starts the claim loop, the executor pool and the heartbeat, and returns
@@ -52,6 +55,7 @@ func Run(ctx context.Context, cfg config.Config, deps Deps, log *slog.Logger) er
 		Log:         log,
 		BackoffBase: cfg.BackoffBase,
 		BackoffMax:  cfg.BackoffMax,
+		Events:      deps.Events,
 	})
 
 	wg.Add(1)

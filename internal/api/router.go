@@ -6,18 +6,23 @@ import (
 	"time"
 
 	"github.com/cricstar1718/taskflow/internal/config"
+	"github.com/cricstar1718/taskflow/internal/ws"
 )
 
 // NewRouter wires every route and middleware.
 //
 // Go 1.22's ServeMux patterns ("POST /api/v1/jobs/{id}/cancel") give method
 // routing and path parameters without chi, so there is one less dependency.
-func NewRouter(cfg config.Config, st Store, q Queue, log *slog.Logger) http.Handler {
+func NewRouter(cfg config.Config, st Store, q Queue, log *slog.Logger, opts ...Option) http.Handler {
 	a := &API{
 		store:      st,
 		queue:      q,
 		log:        log,
 		staleAfter: 30 * time.Second,
+		apiKey:     cfg.APIKey,
+	}
+	for _, o := range opts {
+		o(a)
 	}
 
 	mux := http.NewServeMux()
@@ -39,5 +44,16 @@ func NewRouter(cfg config.Config, st Store, q Queue, log *slog.Logger) http.Hand
 
 	mux.Handle("/api/", APIKeyAuth(cfg.APIKey)(protected))
 
+	// The websocket authenticates with ?key= inside the handler, because a
+	// browser cannot set headers on a handshake; it is therefore registered
+	// outside the X-API-Key middleware.
+	mux.HandleFunc("GET /ws", a.handleWS)
+
 	return RequestID(Recoverer(log)(RequestLogger(log)(CORS(cfg.WebOrigin)(mux))))
 }
+
+// Option customises the router, used to inject the websocket hub.
+type Option func(*API)
+
+// WithHub enables GET /ws.
+func WithHub(h *ws.Hub) Option { return func(a *API) { a.hub = h } }

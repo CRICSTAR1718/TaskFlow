@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/cricstar1718/taskflow/internal/domain"
+	"github.com/cricstar1718/taskflow/internal/events"
 )
 
 // ErrNoWork is returned by Claim when every priority queue is empty.
@@ -51,6 +52,11 @@ type Runner struct {
 
 	// idlePoll is how long the claim loop waits when the queue is empty.
 	idlePoll time.Duration
+
+	// emitter publishes status changes for the live dashboard in order.
+	// Optional: nil means nobody is told, and a publish failure never fails a
+	// job.
+	emitter *events.Emitter
 }
 
 // RunnerConfig configures a Runner.
@@ -64,6 +70,10 @@ type RunnerConfig struct {
 	IdlePoll    time.Duration
 	BackoffBase time.Duration
 	BackoffMax  time.Duration
+
+	// Events is optional; when set every status change is published for the
+	// live dashboard. A publish failure never fails a job.
+	Events events.Publisher
 }
 
 // NewRunner builds a Runner. IdlePoll defaults to 100ms, which keeps queue-wait
@@ -77,7 +87,7 @@ func NewRunner(c RunnerConfig) *Runner {
 	if idle <= 0 {
 		idle = 100 * time.Millisecond
 	}
-	return &Runner{
+	r := &Runner{
 		store:    c.Store,
 		queue:    c.Queue,
 		pool:     c.Pool,
@@ -87,6 +97,10 @@ func NewRunner(c RunnerConfig) *Runner {
 		idlePoll: idle,
 		Backoff:  exponentialBackoff(c.BackoffBase, c.BackoffMax),
 	}
+	if c.Events != nil {
+		r.emitter = events.NewEmitter(c.Events, 256)
+	}
+	return r
 }
 
 // Run claims until ctx is cancelled. Each claimed job is handed to the pool and
@@ -170,6 +184,8 @@ func (r *Runner) execute(ctx context.Context, jobID string) {
 		return
 	}
 
+	r.emit(bg, id, domain.StatusRunning, job.Attempt+1, "")
+
 	attempt, err := r.store.IncrementAttempt(bg, id)
 	if err != nil {
 		r.log.Error("increment attempt", slog.String("job_id", jobID), slog.Any("error", err))
@@ -206,6 +222,21 @@ func (r *Runner) execute(ctx context.Context, jobID string) {
 	r.release(bg, jobID)
 }
 
+// emit publishes a status change without ever blocking or failing the job.
+func (r *Runner) emit(ctx context.Context, jobID uuid.UUID, status domain.Status, attempt int, errMsg string) {
+	if r.emitter == nil {
+		return
+	}
+	r.emitter.Emit(ctx, domain.Event{
+		JobID:    jobID,
+		Status:   status,
+		WorkerID: r.workerID,
+		Attempt:  attempt,
+		At:       time.Now(),
+		Error:    errMsg,
+	})
+}
+
 func (r *Runner) finishSuccess(ctx context.Context, id uuid.UUID, run domain.JobRun, elapsed time.Duration) {
 	if run.ID != uuid.Nil {
 		if err := r.store.FinishRun(ctx, run.ID, domain.StatusSucceeded, ""); err != nil {
@@ -215,6 +246,7 @@ func (r *Runner) finishSuccess(ctx context.Context, id uuid.UUID, run domain.Job
 	if err := r.store.UpdateStatus(ctx, id, domain.StatusRunning, domain.StatusSucceeded); err != nil {
 		r.log.Warn("mark succeeded", slog.Any("error", err))
 	}
+	r.emit(ctx, id, domain.StatusSucceeded, run.Attempt, "")
 	r.log.Info("job succeeded",
 		slog.String("job_id", id.String()),
 		slog.Int("attempt", run.Attempt),
@@ -235,6 +267,7 @@ func (r *Runner) finishFailure(ctx context.Context, id uuid.UUID, job domain.Job
 		if err := r.store.UpdateStatus(ctx, id, domain.StatusRunning, domain.StatusDead); err != nil {
 			r.log.Warn("mark dead", slog.Any("error", err))
 		}
+		r.emit(ctx, id, domain.StatusDead, attempt, msg)
 		r.log.Error("job dead-lettered",
 			slog.String("job_id", id.String()),
 			slog.Int("attempt", attempt),
@@ -256,6 +289,7 @@ func (r *Runner) finishFailure(ctx context.Context, id uuid.UUID, job domain.Job
 	if err := r.store.SetNextRun(ctx, id, &nextAt); err != nil {
 		r.log.Warn("set next run", slog.String("job_id", id.String()), slog.Any("error", err))
 	}
+	r.emit(ctx, id, domain.StatusRetrying, attempt, msg)
 	r.log.Warn("job failed, will retry",
 		slog.String("job_id", id.String()),
 		slog.Int("attempt", attempt),
