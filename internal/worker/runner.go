@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -355,7 +354,3 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
-
-// errQueueEmpty lets the runner treat the queue package's sentinel without
-// importing it into the interface contract.
-var errQueueEmpty = fmt.Errorf("queue: empty")

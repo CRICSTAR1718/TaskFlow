@@ -41,7 +41,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("migrate: %v", err)
 	}
-	defer conn.Close(context.Background())
+	// Close reports an error only if the connection was already broken, and
+	// there is nothing useful to do about it at exit - but errcheck is right
+	// that it should not be silently discarded.
+	defer func() {
+		if err := conn.Close(context.Background()); err != nil {
+			log.Printf("migrate: closing connection: %v", err)
+		}
+	}()
 
 	if err := applyAll(context.Background(), conn, *dir); err != nil {
 		log.Fatalf("migrate: %v", err)
@@ -107,6 +114,8 @@ func applyAll(ctx context.Context, conn *pgx.Conn, dir string) error {
 			continue
 		}
 
+		// #nosec G304 -- f comes from filepath.Glob on the directory the operator
+		// passes to their own migration container; it is not user input.
 		sql, err := os.ReadFile(f)
 		if err != nil {
 			return err
