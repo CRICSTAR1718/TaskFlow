@@ -1,0 +1,6 @@
+node_modules
+dist
+*.local
+.env
+# tsc -b leaves these next to the tsconfigs
+*.tsbuildinfo
