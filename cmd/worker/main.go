@@ -57,7 +57,8 @@ func run() error {
 	q := queue.NewRedis(cfg.RedisAddr)
 	defer func() { _ = q.Close() }()
 
-	if err := worker.Run(ctx, cfg, worker.Deps{Jobs: st, Queue: q}, log); err != nil {
+	deps := worker.Deps{Jobs: st, Queue: q, Heartbeats: q.Client(), Liveness: st}
+	if err := worker.Run(ctx, cfg, deps, log); err != nil {
 		return fmt.Errorf("%s: %w", service, err)
 	}
 

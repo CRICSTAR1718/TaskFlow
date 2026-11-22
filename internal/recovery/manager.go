@@ -39,12 +39,15 @@ type Queue interface {
 	Enqueue(ctx context.Context, jobID string, p domain.Priority) error
 	Requeue(ctx context.Context, jobID string, p domain.Priority) error
 	InFlight(ctx context.Context, workerID string) ([]string, error)
+	// Ack removes a member from a worker's in-flight set.
+	Ack(ctx context.Context, workerID, jobID string) error
 	Depths(ctx context.Context) (map[domain.Priority]int64, error)
 }
 
-// Workers lists workers that have stopped heartbeating.
+// Workers lists workers and records those that stopped heartbeating.
 type Workers interface {
 	ListWorkers(ctx context.Context) ([]domain.WorkerInfo, error)
+	MarkWorkerDead(ctx context.Context, workerID string) error
 }
 
 // Manager runs the recovery sweep.
@@ -62,6 +65,10 @@ type Manager struct {
 
 	// Now is swappable for tests.
 	Now func() time.Time
+
+	// drained remembers workers already swept, so a dead worker is marked dead
+	// in the database once instead of on every tick.
+	drained map[string]bool
 }
 
 // Config configures a Manager.
@@ -105,6 +112,7 @@ func New(c Config) *Manager {
 		StaleAfter: stale,
 		Batch:      batch,
 		Now:        time.Now,
+		drained:    map[string]bool{},
 	}
 	m.Backoff = func(attempt int) time.Duration { return Backoff(attempt, base, maxDelay) }
 	return m
@@ -283,6 +291,11 @@ func (m *Manager) reset(ctx context.Context, j store.RecoverableJob, reason stri
 		slog.String("job_id", j.ID.String()),
 		slog.String("worker_id", j.WorkerID),
 		slog.String("reason", reason))
+	if m.workers != nil && j.WorkerID != "" {
+		if err := m.workers.MarkWorkerDead(ctx, j.WorkerID); err != nil {
+			m.log.Debug("mark worker dead", slog.String("worker_id", j.WorkerID), slog.Any("error", err))
+		}
+	}
 	return nil
 }
 
@@ -301,6 +314,9 @@ func (m *Manager) drainInFlight(ctx context.Context) error {
 		if w.LastHeartbeat.After(cutoff) {
 			continue
 		}
+		if m.drained[w.ID] {
+			continue
+		}
 		ids, err := m.queue.InFlight(ctx, w.ID)
 		if err != nil {
 			return fmt.Errorf("inflight %s: %w", w.ID, err)
@@ -309,12 +325,18 @@ func (m *Manager) drainInFlight(ctx context.Context) error {
 			if aerr := m.queue.Requeue(ctx, id, domain.PriorityNormal); aerr != nil {
 				return fmt.Errorf("requeue inflight %s: %w", id, aerr)
 			}
+			// Clear the member, or the same job is re-queued on every sweep and
+			// the dead worker's set never empties.
+			if derr := m.queue.Ack(ctx, w.ID, id); derr != nil {
+				return fmt.Errorf("clear inflight %s of %s: %w", id, w.ID, derr)
+			}
 		}
 		if len(ids) > 0 {
 			m.log.Info("drained dead worker in-flight set",
 				slog.String("worker_id", w.ID),
 				slog.Int("jobs", len(ids)))
 		}
+		m.drained[w.ID] = true
 	}
 	return nil
 }

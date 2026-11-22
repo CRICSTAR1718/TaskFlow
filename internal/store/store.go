@@ -341,8 +341,8 @@ func (s *Store) exists(ctx context.Context, id uuid.UUID) (bool, error) {
 
 // FetchDueJobs locks up to limit due jobs (PENDING or RETRYING whose
 // next_run_at has arrived), highest priority first. It uses SELECT ... FOR
-// UPDATE SKIP LOCKED, so it must run inside a transaction â€” use Begin and the
-// returned Store â€” typically followed by MarkQueued in the same transaction.
+// UPDATE SKIP LOCKED, so it must run inside a transaction Ã¢â‚¬â€ use Begin and the
+// returned Store Ã¢â‚¬â€ typically followed by MarkQueued in the same transaction.
 func (s *Store) FetchDueJobs(ctx context.Context, now time.Time, limit int) ([]domain.Job, error) {
 	if limit <= 0 {
 		limit = defaultLimit
@@ -726,6 +726,31 @@ func (s *Store) Requeue(ctx context.Context, id uuid.UUID, nextRunAt time.Time, 
 
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("requeue: commit: %w", err)
+	}
+	return nil
+}
+
+// Beat refreshes workers.last_heartbeat and marks the worker alive. It reports
+// ErrNotFound when the row is gone (deleted while the worker was running).
+func (s *Store) Beat(ctx context.Context, workerID string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE workers SET last_heartbeat = clock_timestamp(), alive = true WHERE id = $1`,
+		workerID)
+	if err != nil {
+		return fmt.Errorf("beat: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// MarkWorkerDead flags a worker whose heartbeat expired, so the workers table
+// stops claiming it is alive. Best effort: the Redis key is the real signal.
+func (s *Store) MarkWorkerDead(ctx context.Context, workerID string) error {
+	if _, err := s.db.Exec(ctx,
+		`UPDATE workers SET alive = false WHERE id = $1`, workerID); err != nil {
+		return fmt.Errorf("mark worker dead: %w", err)
 	}
 	return nil
 }
