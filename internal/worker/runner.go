@@ -11,6 +11,7 @@ import (
 
 	"github.com/cricstar1718/taskflow/internal/domain"
 	"github.com/cricstar1718/taskflow/internal/events"
+	"github.com/cricstar1718/taskflow/internal/queue"
 )
 
 // ErrNoWork is returned by Claim when every priority queue is empty.
@@ -57,6 +58,10 @@ type Runner struct {
 	// Optional: nil means nobody is told, and a publish failure never fails a
 	// job.
 	emitter *events.Emitter
+
+	// claimFailures counts consecutive non-empty claim errors, so a broken
+	// Redis is reported once and then summarised instead of spamming.
+	claimFailures int
 }
 
 // RunnerConfig configures a Runner.
@@ -132,7 +137,12 @@ func (r *Runner) Run(ctx context.Context) {
 // step claims and dispatches one job. It reports whether work was dispatched.
 func (r *Runner) step(ctx context.Context, sem chan struct{}) bool {
 	jobID, err := r.queue.Claim(ctx, r.workerID)
-	if errors.Is(err, ErrNoWork) || errors.Is(err, errQueueEmpty) {
+	// An empty queue is the normal state of a healthy idle worker, not a fault.
+	// Comparing by message is not enough: queue.ErrEmpty is wrapped by
+	// queue.Claim, so a plain equality check misses it and every idle worker
+	// logged a WARN once a second - the noisiest thing in a demo.
+	if errors.Is(err, ErrNoWork) || errors.Is(err, queue.ErrEmpty) {
+		r.claimFailures = 0
 		// Nothing queued: wait briefly, then let the caller try again.
 		select {
 		case <-ctx.Done():
@@ -141,7 +151,13 @@ func (r *Runner) step(ctx context.Context, sem chan struct{}) bool {
 		return false
 	}
 	if err != nil {
-		r.log.Warn("claim failed", slog.Any("error", err))
+		// Only a genuine failure reaches here: log the first one immediately,
+		// then back off so a broken Redis cannot fill the log at 1 line/second.
+		r.claimFailures++
+		if r.claimFailures == 1 || r.claimFailures%30 == 0 {
+			r.log.Warn("claim failed",
+				slog.Any("error", err), slog.Int("consecutive_failures", r.claimFailures))
+		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(time.Second):

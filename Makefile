@@ -3,12 +3,20 @@ export
 
 BIN := bin
 SERVICES := api scheduler worker recovery
-MIGRATE := migrate -path migrations -database "$(DATABASE_URL)"
+# The migrator is a small Go program in migrate/, so `make migrate-up` needs no
+# golang-migrate binary on the host (and the compose stack uses the same code).
+MIGRATE := go run ./migrate -dir migrations
 
 .PHONY: up down build test lint migrate-up migrate-down run-api run-worker run-scheduler run-recovery loadtest seed
 
 up:
-	docker compose up -d --wait
+	docker compose up -d --build --wait
+
+# Up, then show every service once it is healthy. This is the command to use in
+# front of an audience.
+up-scale:
+	docker compose up -d --build --wait --scale worker=3
+	docker compose ps
 
 down:
 	docker compose down
@@ -23,10 +31,12 @@ lint:
 	golangci-lint run ./...
 
 migrate-up:
-	$(MIGRATE) up
+	$(MIGRATE)
 
+# There is no down migration runner: dropping and recreating the volume is the
+# honest way to get a clean database, and it is what `make reset` does.
 migrate-down:
-	$(MIGRATE) down 1
+	@echo "use 'make reset' to drop the database volume"
 
 run-api:
 	go run ./cmd/api
@@ -45,3 +55,8 @@ loadtest:
 
 seed:
 	psql "$(DATABASE_URL)" -f scripts/seed.sql
+
+# Wipe everything: containers, volumes, and the Redis queue. Use before a demo.
+reset:
+	docker compose down -v
+	@echo "all data gone; 'make up' starts clean"
