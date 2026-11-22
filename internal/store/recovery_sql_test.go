@@ -175,6 +175,15 @@ func TestFindStaleRunning(t *testing.T) {
 	if _, err := st.CreateRun(ctx, domain.JobRun{JobID: orphan, WorkerID: "dead-worker", Attempt: 1}); err != nil {
 		t.Fatalf("create run: %v", err)
 	}
+	// The run has to be as old as the dead heartbeat: a worker that stopped
+	// beating 10 minutes ago cannot have started a run one second ago.
+	// FindStaleRunning now requires exactly that, so a row that disappears from
+	// the workers table cannot make live work look abandoned.
+	if _, err := pool.Exec(ctx,
+		`UPDATE job_runs SET started_at = now() - interval '10 minutes' WHERE job_id = $1::uuid`,
+		orphan.String()); err != nil {
+		t.Fatalf("age the run: %v", err)
+	}
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO workers (id, hostname, concurrency, started_at, last_heartbeat)
 		 VALUES ('dead-worker','h',1, now(), now() - interval '10 minutes')`); err != nil {

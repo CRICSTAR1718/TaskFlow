@@ -22,6 +22,10 @@ type Heartbeat struct {
 	log      *slog.Logger
 	rdb      *redis.Client
 	store    BeatStore
+
+	// dbFailures counts consecutive Postgres heartbeat failures so a persistent
+	// problem is reported once and then summarised, not once per interval.
+	dbFailures int
 }
 
 // WithRedis attaches the Redis client used to publish the heartbeat. Without it
@@ -75,10 +79,17 @@ func (h *Heartbeat) beat(ctx context.Context) error {
 	}
 
 	// Postgres is for humans. A failure here is not fatal: the Redis key still
-	// expires, so recovery still works.
+	// expires, so recovery still works - so log the first failure, then only
+	// every 30th, instead of writing a warning every interval forever.
 	if h.store != nil {
 		if err := h.store.Beat(ctx, h.workerID); err != nil {
-			h.log.Warn("db heartbeat", slog.String("worker_id", h.workerID), slog.Any("error", err))
+			h.dbFailures++
+			if h.dbFailures == 1 || h.dbFailures%30 == 0 {
+				h.log.Warn("db heartbeat failed",
+					slog.Int("consecutive_failures", h.dbFailures), slog.Any("error", err))
+			}
+		} else {
+			h.dbFailures = 0
 		}
 	}
 	return firstErr
