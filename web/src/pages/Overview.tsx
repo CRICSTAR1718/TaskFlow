@@ -36,7 +36,7 @@ export default function Overview({ live }: { live: LiveEvents }) {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
           <p className="mt-1 text-sm text-slate-400">
-            {total} job{total === 1 ? "" : "s"} tracked Â· {stats.ws_clients} dashboard
+            {total} job{total === 1 ? "" : "s"} tracked · {stats.ws_clients} dashboard
             {stats.ws_clients === 1 ? "" : "s"} connected
           </p>
         </div>
@@ -89,8 +89,11 @@ export default function Overview({ live }: { live: LiveEvents }) {
         <div className="card">
           <div className="flex items-baseline justify-between">
             <div className="label">workers</div>
-            <span className="text-sm text-slate-400">
-              {alive}/{allWorkers} alive
+            <span className="text-sm text-slate-400" title={`${allWorkers} worker ids have ever registered`}>
+              {alive} alive
+              {allWorkers > alive && (
+                <span className="text-slate-600"> · {allWorkers - alive} dead</span>
+              )}
             </span>
           </div>
           <div className="mt-4 space-y-2">
@@ -100,10 +103,13 @@ export default function Overview({ live }: { live: LiveEvents }) {
                   <span className={`h-2 w-2 shrink-0 rounded-full ${w.alive ? "bg-succeeded" : "bg-dead"}`} />
                   <span className="truncate font-mono text-xs text-slate-300">{w.id}</span>
                 </span>
-                <span className="shrink-0 text-xs text-slate-500">Ã—{w.concurrency}</span>
+                <span className="shrink-0 text-xs text-slate-500">×{w.concurrency}</span>
               </div>
             ))}
             {allWorkers === 0 && <div className="text-sm text-slate-500">no workers registered yet</div>}
+            {allWorkers > 0 && alive === 0 && (
+              <div className="text-sm text-retrying">no worker is alive — is the stack still up?</div>
+            )}
           </div>
         </div>
       </section>
@@ -114,7 +120,7 @@ export default function Overview({ live }: { live: LiveEvents }) {
           <p className="text-sm text-slate-500">
             {live.state === "open"
               ? "connected - submit a job and its status changes will appear here."
-              : "waiting for a connection to /wsâ€¦"}
+              : "waiting for a connection to /ws…"}
           </p>
         ) : (
           <ul className="space-y-1.5 font-mono text-xs">

@@ -42,7 +42,7 @@ export default function Jobs({ live }: { live: LiveEvents }) {
         <h1 className="text-2xl font-semibold tracking-tight">Jobs</h1>
         <p className="mt-1 text-sm text-slate-400">
           {jobsQuery.data?.count ?? 0} shown
-          {live.state === "open" && " Â· updating live"}
+          {live.state === "open" && " · updating live"}
         </p>
       </header>
 

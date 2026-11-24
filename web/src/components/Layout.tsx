@@ -25,7 +25,7 @@ export function ConnectionBadge({ state, reconnects }: { state: ConnectionState;
     <div className="flex items-center gap-2 text-xs text-slate-400" title="Live updates over /ws - falls back to polling when it drops">
       <span className={`h-2 w-2 rounded-full ${DOT[state]} ${state === "open" ? "animate-pulse" : ""}`} />
       <span>{TEXT[state]}</span>
-      {reconnects > 0 && <span className="text-slate-600">Â· {reconnects} reconnect{reconnects === 1 ? "" : "s"}</span>}
+      {reconnects > 0 && <span className="text-slate-600">· {reconnects} reconnect{reconnects === 1 ? "" : "s"}</span>}
     </div>
   );
 }
