@@ -3,7 +3,7 @@ import { ApiError } from "../api/client";
 
 export function Loading({ what = "data" }: { what?: string }) {
   return (
-    <div className="card animate-pulse text-sm text-slate-400">loading {what}â€¦</div>
+    <div className="card animate-pulse text-sm text-slate-400">loading {what}…</div>
   );
 }
 

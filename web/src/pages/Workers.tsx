@@ -26,7 +26,7 @@ export default function Workers() {
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Workers</h1>
         <p className="mt-1 text-sm text-slate-400">
-          {workers.filter((w) => w.alive).length} of {workers.length} alive Â· a worker is dead when its
+          {workers.filter((w) => w.alive).length} of {workers.length} alive · a worker is dead when its
           heartbeat is older than the TTL
         </p>
       </header>

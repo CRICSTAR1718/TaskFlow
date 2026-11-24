@@ -275,7 +275,7 @@ export default function SubmitJob() {
           </div>
 
           <button type="submit" className="btn-primary w-full" disabled={create.isPending}>
-            {create.isPending ? "submittingâ€¦" : "submit job"}
+            {create.isPending ? "submitting…" : "submit job"}
           </button>
         </div>
       </form>
